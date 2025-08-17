@@ -35,7 +35,7 @@ function has_allowed_extension($filename) {
     $is_plugin_editor = strpos($_SERVER['REQUEST_URI'], 'plugin-editor.php') !== false;
     
     if ($is_plugin_editor) {
-        $allowed_extensions = ['html', 'php', 'css', 'txt', 'js', 'rtf'];
+        $allowed_extensions = ['html', 'php', 'css', 'txt', 'js', 'rtf', 'md'];
     } else {
         // Theme editor
         $allowed_extensions = ['php', 'css'];
