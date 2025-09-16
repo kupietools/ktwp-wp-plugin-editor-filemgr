@@ -38,7 +38,7 @@ function has_allowed_extension($filename) {
         $allowed_extensions = ['html', 'php', 'css', 'txt', 'js', 'rtf', 'md'];
     } else {
         // Theme editor
-        $allowed_extensions = ['php', 'css'];
+        $allowed_extensions = ['php', 'css','txt','js'];
     }
     
     return in_array($ext, $allowed_extensions);
