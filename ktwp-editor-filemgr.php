@@ -2,8 +2,8 @@
 /*
  * Plugin Name: KupieTools Editor File Manager
  * Plugin URI:        https://michaelkupietz.com/
- * Description:       Add Create New, Rename, and Download file options to Plugin File Editor and Theme File Editor admin screens.
- * Version:           1
+ * Description:       Add Create New, Rename, Download, and Minify file options to Plugin File Editor and Theme File Editor admin screens.
+ * Version:           1.1
  * Requires at least: 5.2
  * Requires PHP:      7.2
  * Author:            Michael Kupietz
@@ -29,6 +29,7 @@ add_action('admin_footer-plugin-editor.php', 'add_file_operations_interface');
 add_action('admin_footer-theme-editor.php', 'add_file_operations_interface');
 add_action('admin_init', 'handle_download_file');
 add_action('admin_init', 'handle_file_operations');
+
 function has_allowed_extension($filename) {
     $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
     
@@ -43,8 +44,6 @@ function has_allowed_extension($filename) {
     
     return in_array($ext, $allowed_extensions);
 }
-
-
 
 function handle_file_operations() {
     if (!current_user_can('edit_themes') && !current_user_can('edit_plugins')) {
@@ -61,7 +60,89 @@ function handle_file_operations() {
         handle_rename_file();
     } elseif ($action === 'create_file') {
         handle_create_file();
+    } elseif ($action === 'minify_file') {
+        handle_minify_file();
     }
+}
+
+/**
+ * Minification Logic
+ */
+function handle_minify_file() {
+    if (!isset($_POST['current_file'])) {
+        wp_die('Missing required fields.');
+    }
+
+    $current_file = sanitize_text_field($_POST['current_file']);
+    $ext = pathinfo($current_file, PATHINFO_EXTENSION);
+
+    if (!in_array($ext, ['js', 'css'])) {
+        wp_die('Only JS and CSS files can be minified.');
+    }
+
+    $is_plugin = isset($_GET['plugin']);
+    
+    if ($is_plugin) {
+        $base_path = WP_PLUGIN_DIR;
+        $redirect_page = 'plugin-editor.php';
+    } else {
+        $stylesheet = get_stylesheet();
+        $base_path = get_theme_root() . '/' . $stylesheet;
+        $redirect_page = 'theme-editor.php';
+    }
+
+    $source_path = $base_path . '/' . $current_file;
+    
+    // Create new filename: style.css -> style.min.css
+    $path_parts = pathinfo($source_path);
+    $new_filename = $path_parts['filename'] . '.min.' . $path_parts['extension'];
+    $dest_path = $path_parts['dirname'] . '/' . $new_filename;
+
+    if (!file_exists($source_path)) {
+        wp_die('Source file does not exist: ' . $source_path);
+    }
+    
+    if (!is_writable(dirname($source_path))) {
+        wp_die('Directory is not writable: ' . dirname($source_path));
+    }
+
+    $content = file_get_contents($source_path);
+    $minified_content = '';
+
+    if ($ext === 'css') {
+        // Remove comments
+        $minified_content = preg_replace('!/\*[^*]*\*+([^/][^*]*\*+)*/!', '', $content);
+        // Remove whitespace
+        $minified_content = str_replace(["\r\n", "\r", "\n", "\t", '  ', '    ', '    '], '', $minified_content);
+        // Remove spaces around colons and braces
+        $minified_content = preg_replace('/\s*([\{\}:;,])\s*/', '$1', $minified_content);
+    } elseif ($ext === 'js') {
+        // Safe JS Minification (Removes comments and trims lines, preserves line breaks to avoid ASI errors)
+        $minified_content = preg_replace('/(\/\*[\s\S]*?\*\/)|(\/\/(.*)$)/m', '', $content);
+        $lines = explode("\n", $minified_content);
+        $lines = array_map('trim', $lines);
+        $lines = array_filter($lines); // remove empty lines
+        $minified_content = implode("\n", $lines);
+    }
+
+    if (file_put_contents($dest_path, $minified_content) !== false) {
+        $query_args = $is_plugin ? ['plugin' => $_GET['plugin']] : ['theme' => get_stylesheet()];
+        
+        // Optionally load the minified file
+        if (FILEOPS_LOAD_NEW_FILE) {
+             // Calculate relative path for the query arg
+             $relative_dest = str_replace($base_path . '/', '', $dest_path);
+             $query_args['file'] = ltrim($relative_dest, '/');
+        } else {
+             // Stay on current file
+             $query_args['file'] = $current_file;
+        }
+        
+        wp_redirect(add_query_arg($query_args, admin_url($redirect_page)));
+        exit;
+    }
+    
+    wp_die('Failed to create minified file.');
 }
 
 function handle_create_file() {
@@ -237,6 +318,15 @@ function add_file_operations_interface() {
         </form>
     </div>
 
+    <!-- Hidden form for Minify actions -->
+    <div style="display:none;">
+        <form id="minify-form" method="post" action="">
+            <?php wp_nonce_field('file_ops_nonce', 'file_ops_nonce'); ?>
+            <input type="hidden" name="action" value="minify_file">
+            <input type="hidden" name="current_file" id="minify_current_file" value="">
+        </form>
+    </div>
+
     <div class="dialog-overlay"></div>
 
     <script>
@@ -258,19 +348,26 @@ function add_file_operations_interface() {
                     if (fileMatch) {
                         var filePath = decodeURIComponent(fileMatch[1]);
                         var parentPath = filePath.split('/').slice(0, -1).join('/');
-         var downloadUrl = '<?php echo admin_url(); ?>?' + 
-    'file=' + encodeURIComponent(filePath) + 
-    '&_wpnonce=' + '<?php echo wp_create_nonce("download_file_nonce"); ?>' +
-    (window.location.href.includes('plugin-editor.php') ? '&plugin=1' : '');
-
-var actions = $('<span class="file-actions">' +
-    '<a href="#" class="rename-file" data-file="' + filePath + '">Rename</a>' +
-    '<a href="#" class="create-file" data-path="' + parentPath + '">New File</a>' +
-    '<a href="' + downloadUrl + '" class="download-file">Download</a>' +
-    '</span>');
-
+                        var ext = filePath.split('.').pop().toLowerCase();
                         
-                        $link.append(actions);
+                        var downloadUrl = '<?php echo admin_url(); ?>?' + 
+                            'file=' + encodeURIComponent(filePath) + 
+                            '&_wpnonce=' + '<?php echo wp_create_nonce("download_file_nonce"); ?>' +
+                            (window.location.href.includes('plugin-editor.php') ? '&plugin=1' : '');
+
+                        var actionHtml = '<span class="file-actions">' +
+                            '<a href="#" class="rename-file" data-file="' + filePath + '">Rename</a>' +
+                            '<a href="#" class="create-file" data-path="' + parentPath + '">New File</a>' +
+                            '<a href="' + downloadUrl + '" class="download-file">Download</a>';
+                        
+                        // Add Minify option for JS and CSS files
+                        if (ext === 'js' || ext === 'css') {
+                            actionHtml += '<a href="#" class="minify-file" data-file="' + filePath + '">Minify</a>';
+                        }
+                        
+                        actionHtml += '</span>';
+
+                        $link.append(actionHtml);
                     }
                 }
             });
@@ -286,20 +383,19 @@ var actions = $('<span class="file-actions">' +
                     
                     if (fileMatch) {
                         var filePath = decodeURIComponent(fileMatch[1]);
-                        var folderPath = filePath.split('/').slice(0, -1).join('/');
+                        var parentPath = filePath.split('/').slice(0, -1).join('/');
                         
-             var downloadUrl = '<?php echo admin_url(); ?>?' + 
-    'file=' + encodeURIComponent(filePath) + 
-    '&_wpnonce=' + '<?php echo wp_create_nonce("download_file_nonce"); ?>' +
-    (window.location.href.includes('plugin-editor.php') ? '&plugin=1' : '');
+                        var downloadUrl = '<?php echo admin_url(); ?>?' + 
+                            'file=' + encodeURIComponent(filePath) + 
+                            '&_wpnonce=' + '<?php echo wp_create_nonce("download_file_nonce"); ?>' +
+                            (window.location.href.includes('plugin-editor.php') ? '&plugin=1' : '');
 
-var actions = $('<span class="file-actions">' +
-    '<a href="#" class="rename-file" data-file="' + filePath + '">Rename</a>' +
-    '<a href="#" class="create-file" data-path="' + parentPath + '">New File</a>' +
-    '<a href="' + downloadUrl + '" class="download-file">Download</a>' +
-    '</span>');
+                        var actions = $('<span class="file-actions">' +
+                            '<a href="#" class="rename-file" data-file="' + filePath + '">Rename</a>' +
+                            '<a href="#" class="create-file" data-path="' + parentPath + '">New File</a>' +
+                            '<a href="' + downloadUrl + '" class="download-file">Download</a>' +
+                            '</span>');
 
-                        
                         $link.append(actions);
                     }
                 }
@@ -331,6 +427,17 @@ var actions = $('<span class="file-actions">' +
             var path = $(this).data('path');
             $('.create-dialog input[name="file_path"]').val(path);
             $('.create-dialog, .dialog-overlay').show();
+        });
+
+        // Minify file
+        $(document).on('click', '.minify-file', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            if(confirm('Create minified version? If a .min file exists, it will be overwritten.')) {
+                var currentFile = $(this).data('file');
+                $('#minify_current_file').val(currentFile);
+                $('#minify-form').submit();
+            }
         });
 
         // Close dialogs
@@ -377,10 +484,4 @@ function handle_download_file() {
     readfile($full_path);
     exit;
 }
-
-
-
-
-
-
 ?>
